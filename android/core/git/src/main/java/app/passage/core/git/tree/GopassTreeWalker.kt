@@ -70,26 +70,43 @@ class GopassTreeWalker {
      * Resolves recipients for a secret by traversing directories upwards from the secret location
      * to the repo root looking for `.age-recipients` or `.gopass-recipients`.
      */
-    fun findRecipientsForPath(repoRoot: File, relativePath: String): List<String> {
+    fun findRecipientsForPath(repoRoot: File, relativePath: String): List<String> =
+        findRecipientsFileForPath(repoRoot, relativePath)?.recipients ?: emptyList()
+
+    /**
+     * Same lookup as [findRecipientsForPath], also telling which recipients file was used.
+     */
+    fun findRecipientsFileForPath(repoRoot: File, relativePath: String): RecipientsFile? {
         val secretFile = File(repoRoot, relativePath)
         var currentDir = if (secretFile.isDirectory) secretFile else secretFile.parentFile
 
         while (currentDir != null && currentDir.startsWith(repoRoot)) {
-            val ageRecipients = File(currentDir, ".age-recipients")
-            if (ageRecipients.exists() && ageRecipients.isFile) {
-                return parseRecipientsFileLines(ageRecipients)
-            }
-
-            val gopassRecipients = File(currentDir, ".gopass-recipients")
-            if (gopassRecipients.exists() && gopassRecipients.isFile) {
-                return parseRecipientsFileLines(gopassRecipients)
+            for (name in RECIPIENTS_FILE_NAMES) {
+                val recipientsFile = File(currentDir, name)
+                if (recipientsFile.exists() && recipientsFile.isFile) {
+                    return RecipientsFile(recipientsFile.relativeTo(repoRoot).path, parseRecipientsFileLines(recipientsFile))
+                }
             }
 
             if (currentDir == repoRoot) break
             currentDir = currentDir.parentFile
         }
 
-        return emptyList()
+        return null
+    }
+
+    /**
+     * Lists every recipients file of the vault.
+     */
+    fun listRecipientsFiles(repoRoot: File): List<RecipientsFile> {
+        if (!repoRoot.exists()) return emptyList()
+
+        return repoRoot.walkTopDown()
+            .onEnter { it == repoRoot || !it.name.startsWith(".git") }
+            .filter { it.isFile && it.name in RECIPIENTS_FILE_NAMES }
+            .map { RecipientsFile(it.relativeTo(repoRoot).path, parseRecipientsFileLines(it)) }
+            .sortedBy { it.relativePath }
+            .toList()
     }
 
     private fun scanFolder(folder: File, repoRoot: File): VaultItem.Folder {
@@ -136,5 +153,9 @@ class GopassTreeWalker {
         return file.readLines(Charsets.UTF_8)
             .map { it.trim() }
             .filter { it.isNotEmpty() && !it.startsWith("#") }
+    }
+
+    private companion object {
+        val RECIPIENTS_FILE_NAMES = listOf(".age-recipients", ".gopass-recipients")
     }
 }

@@ -9,12 +9,16 @@ import app.passage.core.domain.usecase.DeleteSecretUseCase
 import app.passage.core.domain.usecase.GetSecretDetailUseCase
 import app.passage.core.domain.usecase.GetVaultTreeUseCase
 import app.passage.core.domain.usecase.SaveSecretUseCase
+import app.passage.core.git.ssh.PinnedHostKeyStore
 import app.passage.core.git.sync.GitSyncEngine
 import app.passage.core.git.tree.GopassTreeWalker
+import app.passage.core.git.tree.RecipientTrustStore
 import app.passage.core.git.tree.VaultItem
 import app.passage.core.security.BiometricAuthManager
 import app.passage.core.security.IdentityStore
 import app.passage.core.security.SecureClipboardManager
+import app.passage.core.security.SshKeyStore
+import app.passage.core.security.VaultLock
 import app.passage.crypto.AgeCryptoManager
 import app.passage.crypto.ageUserMessage
 import app.passage.crypto.GopassSecret
@@ -31,9 +35,17 @@ import java.io.File
 val appModule = module {
     // Core Managers
     single { AgeCryptoManager() }
-    single { GitSyncEngine() }
+    // Trust decisions live in app-private storage, outside the vault clone the remote controls
+    single { PinnedHostKeyStore(File(get<android.content.Context>().filesDir, "trust/known_hosts")) }
+    single { RecipientTrustStore(File(get<android.content.Context>().filesDir, "trust/recipients")) }
+    single { GitSyncEngine(get()) }
     single { GopassTreeWalker() }
-    single { IdentityStore(get()) }
+    single { VaultLock.getInstance(get()) }
+    single { IdentityStore(get(), get()) }
+    single {
+        val context = get<android.content.Context>()
+        SshKeyStore(context, get(), legacyPlainFile = File(context.filesDir, "ssh/id_ed25519"))
+    }
     single { SecureClipboardManager(get()) }
     single { BiometricAuthManager(get()) }
 
@@ -48,6 +60,7 @@ val appModule = module {
             private val walker = get<GopassTreeWalker>()
             private val crypto = get<AgeCryptoManager>()
             private val identityStore = get<IdentityStore>()
+            private val recipientTrust = get<RecipientTrustStore>()
 
             override fun getVaultTree(): Flow<VaultFolder> = flow {
                 val rootItem = walker.buildTree(repoDir)
@@ -74,13 +87,23 @@ val appModule = module {
                 secret: SecretDetail,
                 recipientsOverride: List<String>?
             ): Result<Unit> = runCatching {
-                val recipients = recipientsOverride ?: walker.findRecipientsForPath(repoDir, relativePath)
+                val recipients = recipientsOverride ?: trustedRecipientsFor(relativePath)
                 val gopassSecret = GopassSecret(secret.password, secret.attributes, secret.attributes.keys.toList(), secret.notes)
                 val encrypted = crypto.encryptSecret(gopassSecret, recipients).getOrThrow()
 
                 val file = File(repoDir, relativePath)
                 file.parentFile?.mkdirs()
                 file.writeBytes(encrypted)
+            }
+
+            /** Recipients files come from the remote: only a set the user approved is used to encrypt. */
+            private fun trustedRecipientsFor(relativePath: String): List<String> {
+                val recipientsFile = walker.findRecipientsFileForPath(repoDir, relativePath) ?: return emptyList()
+                check(recipientTrust.isTrusted(recipientsFile)) {
+                    "Os destinatários em ${recipientsFile.relativePath} ainda não foram aprovados neste aparelho. " +
+                        "Revise-os em Sincronizar antes de salvar."
+                }
+                return recipientsFile.recipients
             }
 
             override suspend fun deleteSecret(relativePath: String): Result<Unit> = runCatching {
@@ -121,8 +144,11 @@ val appModule = module {
             clipboardManager = get(),
             cryptoManager = get(),
             identityStore = get(),
-            vaultDir = File(context.filesDir, "vault"),
-            sshKeyFile = File(context.filesDir, "ssh/id_ed25519")
+            sshKeyStore = get(),
+            hostKeyStore = get(),
+            treeWalker = get(),
+            recipientTrust = get(),
+            vaultDir = File(context.filesDir, "vault")
         )
     }
 }

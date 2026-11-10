@@ -1,5 +1,7 @@
 package app.passage.core.git.model
 
+import app.passage.core.git.ssh.HostKeyInfo
+
 sealed class SyncResult {
     data class Success(val commitHash: String?, val message: String) : SyncResult()
     data class HasConflicts(val conflictedFiles: List<String>) : SyncResult()
@@ -38,5 +40,11 @@ sealed class GitException(message: String, cause: Throwable? = null) : Exception
     class RemoteNotFound(message: String, cause: Throwable? = null) : GitException(message, cause)
     class MergeConflict(val conflictedFiles: List<String>) : GitException("Merge conflicts detected in: $conflictedFiles")
     class NetworkError(message: String, cause: Throwable? = null) : GitException(message, cause)
+    /** The server is not pinned yet: the user must compare and approve [key] before connecting. */
+    class UnknownHostKey(val key: HostKeyInfo) :
+        GitException("Chave de host SSH desconhecida para ${key.host}: ${key.fingerprint}")
+    /** The server is pinned to another key: possible man-in-the-middle. */
+    class HostKeyChanged(val key: HostKeyInfo) :
+        GitException("A chave de host SSH de ${key.host} mudou: ${key.fingerprint}")
     class OperationFailed(message: String, cause: Throwable? = null) : GitException(message, cause)
 }

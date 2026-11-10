@@ -6,6 +6,8 @@ import app.passage.core.git.model.GitException
 import app.passage.core.git.model.GitRepoStatus
 import app.passage.core.git.model.SyncResult
 import app.passage.core.git.ssh.CustomSshSessionFactory
+import app.passage.core.git.ssh.PinnedHostKeyStore
+import app.passage.core.git.ssh.PinningHostKeyRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.eclipse.jgit.api.CheckoutCommand
@@ -20,7 +22,7 @@ import org.eclipse.jgit.transport.Transport
 import org.eclipse.jgit.transport.UsernamePasswordCredentialsProvider
 import java.io.File
 
-class GitSyncEngine {
+class GitSyncEngine(private val hostKeyStore: PinnedHostKeyStore) {
 
     /**
      * Clones a remote git repository into [destinationDir].
@@ -31,6 +33,7 @@ class GitSyncEngine {
         auth: GitAuth,
         onProgress: ((task: String, percent: Float) -> Unit)? = null
     ): Result<Unit> = withContext(Dispatchers.IO) {
+        var hostKeys: PinningHostKeyRepository? = null
         runCatching {
             if (destinationDir.exists() && destinationDir.list()?.isNotEmpty() == true) {
                 throw GitException.OperationFailed("Destination directory is not empty: ${destinationDir.absolutePath}")
@@ -41,10 +44,10 @@ class GitSyncEngine {
                 .setDirectory(destinationDir)
                 .setProgressMonitor(createProgressMonitor(onProgress))
 
-            configureAuthentication(cloneCommand, auth)
+            hostKeys = configureAuthentication(cloneCommand, auth)
             val git = cloneCommand.call()
             git.close()
-        }
+        }.recoverCatching { error -> throw hostKeyFailure(hostKeys) ?: error }
     }
 
     /**
@@ -54,12 +57,13 @@ class GitSyncEngine {
         repoDir: File,
         auth: GitAuth
     ): SyncResult = withContext(Dispatchers.IO) {
+        var hostKeys: PinningHostKeyRepository? = null
         try {
             Git.open(repoDir).use { git ->
                 val pullCmd = git.pull()
                     .setFastForward(MergeCommand.FastForwardMode.FF)
 
-                configureAuthentication(pullCmd, auth)
+                hostKeys = configureAuthentication(pullCmd, auth)
                 val pullResult = pullCmd.call()
 
                 if (pullResult.isSuccessful) {
@@ -80,7 +84,7 @@ class GitSyncEngine {
                 }
             }
         } catch (e: Exception) {
-            SyncResult.Failure(mapException(e))
+            SyncResult.Failure(hostKeyFailure(hostKeys) ?: mapException(e))
         }
     }
 
@@ -95,6 +99,7 @@ class GitSyncEngine {
         auth: GitAuth,
         filesToStage: List<String>? = null
     ): SyncResult = withContext(Dispatchers.IO) {
+        var hostKeys: PinningHostKeyRepository? = null
         try {
             Git.open(repoDir).use { git ->
                 // 1. Stage files
@@ -117,7 +122,7 @@ class GitSyncEngine {
 
                 // 3. Push
                 val pushCmd = git.push()
-                configureAuthentication(pushCmd, auth)
+                hostKeys = configureAuthentication(pushCmd, auth)
                 val pushResults = pushCmd.call()
 
                 val pushSuccess = pushResults.all { result ->
@@ -137,7 +142,7 @@ class GitSyncEngine {
                 }
             }
         } catch (e: Exception) {
-            SyncResult.Failure(mapException(e))
+            SyncResult.Failure(hostKeyFailure(hostKeys) ?: mapException(e))
         }
     }
 
@@ -223,48 +228,47 @@ class GitSyncEngine {
         }
     }
 
-    // Helper: configure Transport and Credentials for any JGit command
+    // Helper: configure Transport and Credentials for any JGit command.
+    // Returns the host key check used by SSH connections, which records the key it refused.
     private fun <C : org.eclipse.jgit.api.TransportCommand<C, *>> configureAuthentication(
         command: C,
         auth: GitAuth
-    ) {
-        when (auth) {
-            is GitAuth.SshKey -> {
-                val sessionFactory = CustomSshSessionFactory(
-                    privateKeyContent = auth.privateKeyContent,
-                    passphrase = auth.passphrase
-                )
-                command.setTransportConfigCallback(TransportConfigCallback { transport ->
-                    if (transport is SshTransport) {
-                        transport.sshSessionFactory = sessionFactory
-                    }
-                })
-            }
+    ): PinningHostKeyRepository? {
+        fun useSshKey(privateKeyContent: String, passphrase: String?): PinningHostKeyRepository {
+            val hostKeys = PinningHostKeyRepository(hostKeyStore)
+            val sessionFactory = CustomSshSessionFactory(
+                privateKeyContent = privateKeyContent,
+                passphrase = passphrase,
+                hostKeys = hostKeys
+            )
+            command.setTransportConfigCallback(TransportConfigCallback { transport ->
+                if (transport is SshTransport) {
+                    transport.sshSessionFactory = sessionFactory
+                }
+            })
+            return hostKeys
+        }
 
-            is GitAuth.SshKeyFile -> {
-                val content = auth.keyFile.readText(Charsets.UTF_8)
-                val sessionFactory = CustomSshSessionFactory(
-                    privateKeyContent = content,
-                    passphrase = auth.passphrase
-                )
-                command.setTransportConfigCallback(TransportConfigCallback { transport ->
-                    if (transport is SshTransport) {
-                        transport.sshSessionFactory = sessionFactory
-                    }
-                })
-            }
+        return when (auth) {
+            is GitAuth.SshKey -> useSshKey(auth.privateKeyContent, auth.passphrase)
+
+            is GitAuth.SshKeyFile -> useSshKey(auth.keyFile.readText(Charsets.UTF_8), auth.passphrase)
 
             is GitAuth.HttpToken -> {
                 val credentialsProvider: CredentialsProvider =
                     UsernamePasswordCredentialsProvider(auth.username, auth.token)
                 command.setCredentialsProvider(credentialsProvider)
+                null
             }
 
-            is GitAuth.None -> {
-                // Anonymous access
-            }
+            is GitAuth.None -> null // Anonymous access
         }
     }
+
+    private fun hostKeyFailure(hostKeys: PinningHostKeyRepository?): GitException? =
+        hostKeys?.rejected?.let { rejected ->
+            if (rejected.changed) GitException.HostKeyChanged(rejected.key) else GitException.UnknownHostKey(rejected.key)
+        }
 
     private fun createProgressMonitor(callback: ((String, Float) -> Unit)?): ProgressMonitor {
         return object : ProgressMonitor {

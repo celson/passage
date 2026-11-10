@@ -1,33 +1,45 @@
 package app.passage.core.security
 
 import android.content.Context
+import android.os.Build
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import kotlinx.coroutines.suspendCancellableCoroutine
+import javax.crypto.Cipher
 import kotlin.coroutines.resume
 
 sealed class BiometricResult {
-    data object Success : BiometricResult()
+    /** The user authenticated and [cipher] is now authorized for one operation. */
+    data class Success(val cipher: Cipher) : BiometricResult()
     data class Error(val errorCode: Int, val errString: String) : BiometricResult()
-    data object Failed : BiometricResult()
     data object Unavailable : BiometricResult()
 }
 
 class BiometricAuthManager(private val context: Context) {
 
-    fun canAuthenticate(): Boolean {
-        val biometricManager = BiometricManager.from(context)
-        return biometricManager.canAuthenticate(
+    // A CryptoObject can only be authorized by the device credential (PIN, pattern, password) from
+    // Android 11 on; older versions need a strong biometric
+    private val authenticators: Int =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             BiometricManager.Authenticators.BIOMETRIC_STRONG or BiometricManager.Authenticators.DEVICE_CREDENTIAL
-        ) == BiometricManager.BIOMETRIC_SUCCESS
-    }
+        } else {
+            BiometricManager.Authenticators.BIOMETRIC_STRONG
+        }
 
+    fun canAuthenticate(): Boolean =
+        BiometricManager.from(context).canAuthenticate(authenticators) == BiometricManager.BIOMETRIC_SUCCESS
+
+    /**
+     * Asks the user to authenticate and, on success, returns [cipher] authorized by the Keystore.
+     * The result is bound to the cipher: there is nothing to bypass by faking a callback.
+     */
     suspend fun authenticate(
         activity: FragmentActivity,
-        title: String = "Desbloquear Segredo",
-        subtitle: String = "Autentique com biometria ou PIN para descriptografar"
+        cipher: Cipher,
+        title: String = "Desbloquear o Passage",
+        subtitle: String = "Autentique para abrir o cofre"
     ): BiometricResult = suspendCancellableCoroutine { continuation ->
         if (!canAuthenticate()) {
             continuation.resume(BiometricResult.Unavailable)
@@ -38,9 +50,12 @@ class BiometricAuthManager(private val context: Context) {
         val promptInfo = BiometricPrompt.PromptInfo.Builder()
             .setTitle(title)
             .setSubtitle(subtitle)
-            .setAllowedAuthenticators(
-                BiometricManager.Authenticators.BIOMETRIC_STRONG or BiometricManager.Authenticators.DEVICE_CREDENTIAL
-            )
+            .setAllowedAuthenticators(authenticators)
+            .apply {
+                if (authenticators and BiometricManager.Authenticators.DEVICE_CREDENTIAL == 0) {
+                    setNegativeButtonText("Cancelar")
+                }
+            }
             .build()
 
         val biometricPrompt = BiometricPrompt(
@@ -48,19 +63,26 @@ class BiometricAuthManager(private val context: Context) {
             executor,
             object : BiometricPrompt.AuthenticationCallback() {
                 override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                    continuation.resume(BiometricResult.Success)
+                    if (!continuation.isActive) return
+                    val authorized = result.cryptoObject?.cipher
+                    if (authorized != null) {
+                        continuation.resume(BiometricResult.Success(authorized))
+                    } else {
+                        continuation.resume(BiometricResult.Error(0, "Autenticação sem vínculo com a chave do cofre"))
+                    }
                 }
 
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                    continuation.resume(BiometricResult.Error(errorCode, errString.toString()))
+                    if (continuation.isActive) {
+                        continuation.resume(BiometricResult.Error(errorCode, errString.toString()))
+                    }
                 }
 
-                override fun onAuthenticationFailed() {
-                    continuation.resume(BiometricResult.Failed)
-                }
+                // onAuthenticationFailed is a rejected attempt: the prompt stays open for another try
             }
         )
 
-        biometricPrompt.authenticate(promptInfo)
+        continuation.invokeOnCancellation { biometricPrompt.cancelAuthentication() }
+        biometricPrompt.authenticate(promptInfo, BiometricPrompt.CryptoObject(cipher))
     }
 }

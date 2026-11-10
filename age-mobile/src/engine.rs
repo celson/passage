@@ -3,8 +3,14 @@ use crate::identities::{parse_identity, ParsedIdentity};
 use crate::recipients::parse_recipient;
 use age::secrecy::SecretString;
 use std::io::{Read, Write};
+use zeroize::Zeroizing;
 
 const ARMOR_HEADER: &[u8] = b"-----BEGIN AGE ENCRYPTED FILE-----";
+
+/// Upper bound for ciphertext and for decrypted output. Ciphertext comes from the git
+/// remote, so without a cap a huge file would exhaust the phone's memory. Secrets are
+/// small text files; 16 MiB is generous.
+const MAX_DECRYPT_BYTES: usize = 16 * 1024 * 1024;
 
 /// Encrypts plaintext bytes for a list of recipients (public keys).
 /// If `armor` is true, output is ASCII armored (standard for text/gopass files).
@@ -90,6 +96,12 @@ pub fn decrypt_internal(
     identities: &[String],
     passphrase: Option<&str>,
 ) -> Result<Vec<u8>, AgeError> {
+    if ciphertext.len() > MAX_DECRYPT_BYTES {
+        return Err(AgeError::DecryptionFailed {
+            reason: format!("Ciphertext exceeds the {} byte limit", MAX_DECRYPT_BYTES),
+        });
+    }
+
     let trimmed = match std::str::from_utf8(ciphertext) {
         Ok(s) => s.trim_start().as_bytes(),
         Err(_) => ciphertext,
@@ -101,6 +113,26 @@ pub fn decrypt_internal(
     } else {
         decrypt_from_reader(ciphertext, identities, passphrase)
     }
+}
+
+/// Reads at most `limit` bytes; one extra byte tells "exactly at the limit" from "over it".
+/// The buffer is wiped if reading fails or the limit is exceeded.
+fn read_limited<R: Read>(reader: R, limit: usize) -> Result<Vec<u8>, AgeError> {
+    let mut decrypted = Zeroizing::new(Vec::new());
+    reader
+        .take(limit as u64 + 1)
+        .read_to_end(&mut decrypted)
+        .map_err(|e| AgeError::DecryptionFailed {
+            reason: e.to_string(),
+        })?;
+
+    if decrypted.len() > limit {
+        return Err(AgeError::DecryptionFailed {
+            reason: format!("Decrypted data exceeds the {} byte limit", limit),
+        });
+    }
+
+    Ok(std::mem::take(&mut *decrypted))
 }
 
 fn decrypt_from_reader<R: Read>(
@@ -126,39 +158,44 @@ fn decrypt_from_reader<R: Read>(
             let id_refs: Vec<&dyn age::Identity> =
                 parsed.iter().map(|p| p.as_identity()).collect();
 
-            let mut decrypt_reader = d
+            let decrypt_reader = d
                 .decrypt(id_refs.into_iter())
                 .map_err(|e| AgeError::DecryptionFailed {
                     reason: e.to_string(),
                 })?;
 
-            let mut decrypted = Vec::new();
-            decrypt_reader
-                .read_to_end(&mut decrypted)
-                .map_err(|e| AgeError::DecryptionFailed {
-                    reason: e.to_string(),
-                })?;
-
-            Ok(decrypted)
+            read_limited(decrypt_reader, MAX_DECRYPT_BYTES)
         }
         age::Decryptor::Passphrase(d) => {
             let pass = passphrase.ok_or(AgeError::PassphraseRequired)?;
-            let secret_pass = SecretString::new(pass.to_string().into());
+            // Build the Box<str> straight from the borrowed &str: no intermediate String is
+            // left behind, and SecretString wipes its own copy on drop.
+            let secret_pass = SecretString::new(pass.into());
 
-            let mut decrypt_reader = d
+            let decrypt_reader = d
                 .decrypt(&secret_pass, None)
                 .map_err(|e| AgeError::DecryptionFailed {
                     reason: e.to_string(),
                 })?;
 
-            let mut decrypted = Vec::new();
-            decrypt_reader
-                .read_to_end(&mut decrypted)
-                .map_err(|e| AgeError::DecryptionFailed {
-                    reason: e.to_string(),
-                })?;
-
-            Ok(decrypted)
+            read_limited(decrypt_reader, MAX_DECRYPT_BYTES)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The age format always adds overhead, so ciphertext can never be smaller than its
+    // plaintext and the output cap cannot be reached through decrypt_internal alone;
+    // it is tested on the bounded read itself.
+    #[test]
+    fn test_read_limited_is_inclusive_and_rejects_overflow() {
+        assert_eq!(read_limited(&[7u8; 10][..], 10).unwrap().len(), 10);
+        assert!(matches!(
+            read_limited(&[7u8; 11][..], 10),
+            Err(AgeError::DecryptionFailed { .. })
+        ));
     }
 }

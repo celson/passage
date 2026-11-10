@@ -13,7 +13,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 # A newer push supersedes a running build of the same ref (tags are never cancelled)
 concurrency:
@@ -27,10 +27,13 @@ jobs:
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # The build never pushes; do not leave the token in .git/config for later steps
+          persist-credentials: false
 
       - name: Set up Java 17 (Temurin)
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
         with:
           distribution: 'temurin'
           java-version: '17'
@@ -51,18 +54,18 @@ jobs:
           echo "Selected NDK: $NDK_PATH"
 
       - name: Set up Rust Toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           toolchain: stable
           cache-workspaces: age-mobile
           target: aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android, i686-linux-android
 
       - name: Install cargo-ndk
-        run: cargo install cargo-ndk
+        run: cargo install cargo-ndk --locked --version 4.1.2
 
       - name: Test Native Age Engine
         working-directory: age-mobile
-        run: cargo test
+        run: cargo test --locked
 
       # Tags ship every ABI; other builds only the ones real devices use
       - name: Compile Native .so Libraries for Android
@@ -74,30 +77,32 @@ jobs:
           ./build-android.sh
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@748248ddd2a24f49513d8f472f81c3a07d4d50e1 # v4.4.4
 
+      # The real keystore is only for pushes to main / v* tags. Pull requests and manual runs
+      # on other refs always get the throwaway one, even when secrets are available.
+      # Passwords never go to $GITHUB_ENV: only the Gradle step below receives them.
       - name: Prepare Signing Keystore
+        id: keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          IS_RELEASE_REF: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
         run: |
           mkdir -p "$RUNNER_TEMP/keystore"
           KEYSTORE_FILE="$RUNNER_TEMP/keystore/release.keystore"
-          if [ -n "$KEYSTORE_BASE64" ]; then
+          if [ "$IS_RELEASE_REF" = "true" ]; then
+            if [ -z "$KEYSTORE_BASE64" ]; then
+              echo "::error::ANDROID_KEYSTORE_BASE64 is not configured. Official release builds must use repository secrets."
+              exit 1
+            fi
             echo "Using release keystore from GitHub Secrets"
             echo "$KEYSTORE_BASE64" | base64 -d > "$KEYSTORE_FILE"
-            echo "KEYSTORE_PATH=$KEYSTORE_FILE" >> $GITHUB_ENV
-            echo "KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> $GITHUB_ENV
-            echo "KEY_ALIAS=$KEY_ALIAS" >> $GITHUB_ENV
-            echo "KEY_PASSWORD=$KEY_PASSWORD" >> $GITHUB_ENV
-          elif [ "${{ startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' }}" = "true" ]; then
-            echo "::error::ANDROID_KEYSTORE_BASE64 is not configured. Official release builds must use repository secrets."
-            exit 1
+            echo "mode=release" >> "$GITHUB_OUTPUT"
+            echo "alias=" >> "$GITHUB_OUTPUT"
           else
             echo "Generating ephemeral keystore for CI test build"
-            RANDOM_PASS=$(head -c 32 /dev/urandom | base64)
+            RANDOM_PASS=$(head -c 32 /dev/urandom | base64 | tr -d '\n')
+            echo "::add-mask::$RANDOM_PASS"
             keytool -genkeypair -v \
               -keystore "$KEYSTORE_FILE" \
               -alias "ci-test" \
@@ -107,14 +112,19 @@ jobs:
               -storepass "$RANDOM_PASS" \
               -keypass "$RANDOM_PASS" \
               -dname "CN=Passage CI Test, OU=CI, O=Passage, L=Test, ST=Test, C=US"
-            echo "KEYSTORE_PATH=$KEYSTORE_FILE" >> $GITHUB_ENV
-            echo "KEYSTORE_PASSWORD=$RANDOM_PASS" >> $GITHUB_ENV
-            echo "KEY_ALIAS=ci-test" >> $GITHUB_ENV
-            echo "KEY_PASSWORD=$RANDOM_PASS" >> $GITHUB_ENV
+            echo "mode=ci" >> "$GITHUB_OUTPUT"
+            echo "alias=ci-test" >> "$GITHUB_OUTPUT"
+            echo "ci_password=$RANDOM_PASS" >> "$GITHUB_OUTPUT"
           fi
+          echo "path=$KEYSTORE_FILE" >> "$GITHUB_OUTPUT"
 
       - name: Build Signed Android Release APK
         working-directory: android
+        env:
+          KEYSTORE_PATH: ${{ steps.keystore.outputs.path }}
+          KEYSTORE_PASSWORD: ${{ steps.keystore.outputs.mode == 'release' && secrets.ANDROID_KEYSTORE_PASSWORD || steps.keystore.outputs.ci_password }}
+          KEY_ALIAS: ${{ steps.keystore.outputs.mode == 'release' && secrets.ANDROID_KEY_ALIAS || steps.keystore.outputs.alias }}
+          KEY_PASSWORD: ${{ steps.keystore.outputs.mode == 'release' && secrets.ANDROID_KEY_PASSWORD || steps.keystore.outputs.ci_password }}
         run: |
           chmod +x gradlew
           ./gradlew assembleRelease --stacktrace
@@ -128,17 +138,37 @@ jobs:
           fi
 
       - name: Upload APK as Workflow Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: Passage-Android-APK
           path: dist-apk/Passage.apk
           retention-days: 30
 
+      - name: Remove Signing Keystore
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/keystore"
+
+  # Separate job so the write token never shares a runner with the keystore secrets or the build
+  release:
+    name: Publish Release
+    needs: build
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download APK Artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: Passage-Android-APK
+          path: dist-apk
+
       # Rolling build of main, published as a prerelease with make_latest: false so it
       # never takes the "Latest" badge from versioned v* releases.
       - name: Publish or Update Rolling Main Build
         if: github.ref == 'refs/heads/main'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: latest
           name: Passage (development build - main)
@@ -153,7 +183,7 @@ jobs:
 
       - name: Create GitHub Release on Tag
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: dist-apk/Passage.apk
           generate_release_notes: true

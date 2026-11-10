@@ -53,7 +53,7 @@ impl ParsedIdentity {
 
 pub fn parse_identity(
     secret: &str,
-    passphrase: Option<&str>,
+    _passphrase: Option<&str>,
 ) -> Result<ParsedIdentity, AgeError> {
     let trimmed = secret.trim();
 
@@ -67,7 +67,9 @@ pub fn parse_identity(
     } else if trimmed.contains("PRIVATE KEY") {
         // SSH private key PEM or OpenSSH format
         let mut cursor = std::io::Cursor::new(trimmed.as_bytes());
-        match age::ssh::Identity::from_buffer(&mut cursor, passphrase.map(|p| p.to_string())) {
+        // The 2nd argument of from_buffer is the key's file name (only used in prompts), not
+        // a passphrase: passing the passphrase there only made an unwiped copy of it.
+        match age::ssh::Identity::from_buffer(&mut cursor, None) {
             Ok(age::ssh::Identity::Unsupported(_)) => Err(AgeError::InvalidIdentity {
                 reason: "Unsupported SSH private key algorithm".to_string(),
             }),

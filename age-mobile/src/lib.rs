@@ -9,6 +9,7 @@ uniffi::setup_scaffolding!();
 use crate::error::AgeError;
 use crate::gopass::GopassSecret;
 use crate::identities::AgeKeyPair;
+use zeroize::Zeroize;
 
 /// Generates a new random X25519 age keypair.
 #[uniffi::export]
@@ -18,8 +19,11 @@ pub fn generate_keypair() -> AgeKeyPair {
 
 /// Derives the public recipient (`age1...`) from an age secret key (`AGE-SECRET-KEY-1...`).
 #[uniffi::export]
-pub fn identity_to_recipient(secret_identity: String) -> Result<String, AgeError> {
-    identities::identity_to_recipient_internal(&secret_identity)
+pub fn identity_to_recipient(mut secret_identity: String) -> Result<String, AgeError> {
+    let result = identities::identity_to_recipient_internal(&secret_identity);
+    // The crate owns this copy once it crosses the FFI boundary; wipe it before dropping.
+    secret_identity.zeroize();
+    result
 }
 
 /// Encrypts raw bytes for one or more recipients (public keys).
@@ -39,10 +43,14 @@ pub fn encrypt_bytes(
 #[uniffi::export]
 pub fn decrypt_bytes(
     ciphertext: Vec<u8>,
-    identities: Vec<String>,
-    passphrase: Option<String>,
+    mut identities: Vec<String>,
+    mut passphrase: Option<String>,
 ) -> Result<Vec<u8>, AgeError> {
-    engine::decrypt_internal(&ciphertext, &identities, passphrase.as_deref())
+    let result = engine::decrypt_internal(&ciphertext, &identities, passphrase.as_deref());
+    // Wipe the copies this crate owns; the caller's own copies are out of reach here.
+    identities.zeroize();
+    passphrase.zeroize();
+    result
 }
 
 /// Parses a `.age-recipients` or `.gopass-recipients` file content,
@@ -185,5 +193,28 @@ mod tests {
             decrypt_bytes(file, vec![], None),
             Err(AgeError::PassphraseRequired)
         ));
+    }
+
+    /// 16 MiB: keep in sync with `MAX_DECRYPT_BYTES` in engine.rs.
+    const LIMIT: usize = 16 * 1024 * 1024;
+
+    #[test]
+    fn test_oversized_ciphertext_is_rejected() {
+        let key = generate_keypair();
+        let res = decrypt_bytes(vec![0u8; LIMIT + 1], vec![key.secret_identity], None);
+        match res {
+            Err(AgeError::DecryptionFailed { reason }) => assert!(reason.contains("limit")),
+            other => panic!("Expected DecryptionFailed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_large_secret_below_limit_roundtrips() {
+        let key = generate_keypair();
+        // Leave room for the age header and per-chunk overhead.
+        let payload = vec![b'a'; LIMIT - 64 * 1024];
+        let encrypted = encrypt_bytes(payload.clone(), vec![key.public_recipient], false).unwrap();
+        let decrypted = decrypt_bytes(encrypted, vec![key.secret_identity], None).unwrap();
+        assert_eq!(decrypted, payload);
     }
 }

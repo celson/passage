@@ -47,6 +47,8 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.runtime.Composable
@@ -226,6 +228,7 @@ fun SyncScreen(
                             onValueChange = { identityPassphrase = it },
                             label = { Text("Senha do arquivo") },
                             visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )
@@ -251,6 +254,7 @@ fun SyncScreen(
                         onValueChange = { pastedKey = it },
                         label = { Text("Ou cole a chave (AGE-SECRET-KEY-1...)") },
                         visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true
                     )

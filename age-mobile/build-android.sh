@@ -23,17 +23,17 @@ for abi in $ABIS; do
     TARGET_ARGS+=(-t "$abi")
 done
 
-cargo ndk "${TARGET_ARGS[@]}" --platform 26 -o "$OUTPUT_JNI_DIR" build --release
+cargo ndk "${TARGET_ARGS[@]}" --platform 26 -o "$OUTPUT_JNI_DIR" build --release --locked
 
 echo "=== Generating Kotlin UniFFI bindings ==="
 # Build host dylib to extract interface metadata
-cargo build --release
+cargo build --locked --release
 DYLIB_PATH="target/release/libage_mobile.dylib"
 if [[ "$OSTYPE" == "linux"* ]]; then
     DYLIB_PATH="target/release/libage_mobile.so"
 fi
 
-cargo run --bin uniffi-bindgen -- generate \
+cargo run --locked --bin uniffi-bindgen -- generate \
     --library "$DYLIB_PATH" \
     --language kotlin \
     --out-dir "$KOTLIN_OUT_DIR" \

@@ -100,8 +100,8 @@ class SecretEditorViewModel(
 
     fun save(onSuccess: (savedPath: String) -> Unit) {
         val cleanName = name.value.trim().removeSuffix(".age")
-        if (cleanName.isEmpty()) {
-            _saveState.value = EditorSaveState.Error("O nome do segredo é obrigatório")
+        SecretNameValidator.validate(cleanName)?.let { message ->
+            _saveState.value = EditorSaveState.Error(message)
             return
         }
 

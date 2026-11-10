@@ -12,6 +12,7 @@ import android.view.autofill.AutofillValue
 import android.widget.RemoteViews
 import app.passage.core.database.PassageDatabase
 import app.passage.core.security.IdentityStore
+import app.passage.core.security.VaultLock
 import app.passage.crypto.AgeCryptoManager
 import app.passage.feature.autofill.R
 import app.passage.feature.autofill.parser.AutofillStructureParser
@@ -26,7 +27,8 @@ class PassageAutofillService : AutofillService() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val cryptoManager = AgeCryptoManager()
-    private val identityStore by lazy { IdentityStore(applicationContext) }
+    // Nothing is offered while the vault is locked: reading the identities throws
+    private val identityStore by lazy { IdentityStore(applicationContext, VaultLock.getInstance(applicationContext)) }
 
     override fun onDestroy() {
         super.onDestroy()
@@ -76,8 +78,7 @@ class PassageAutofillService : AutofillService() {
                     val secretFile = File(vaultDir, match.relativePath)
                     if (!secretFile.exists()) continue
 
-                    // In a production setup, active identity is decrypted via Keystore
-                    // For autofill, we decrypt the secret file to read login and password
+                    // Decrypt the secret file to read login and password
                     val encryptedBytes = secretFile.readBytes()
                     val gopassSecret = cryptoManager.decryptSecret(encryptedBytes, identities).getOrNull() ?: continue
 

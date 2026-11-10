@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -60,6 +61,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import app.passage.core.git.model.ConflictStrategy
+import app.passage.core.git.tree.RecipientsChange
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -74,6 +76,8 @@ fun SyncScreen(
     val sshPublicKey by viewModel.sshPublicKey.collectAsState()
     val remoteUrl by viewModel.remoteUrl.collectAsState()
     val identityCount by viewModel.identityCount.collectAsState()
+    val hostKeyPrompt by viewModel.hostKeyPrompt.collectAsState()
+    val pendingRecipients by viewModel.pendingRecipients.collectAsState()
 
     val context = LocalContext.current
     var identityFile by remember { mutableStateOf<ByteArray?>(null) }
@@ -96,6 +100,15 @@ fun SyncScreen(
             is SyncUiOperation.Error -> snackbarHostState.showSnackbar(op.message)
             else -> {}
         }
+    }
+
+    hostKeyPrompt?.let { prompt ->
+        HostKeyDialog(
+            prompt = prompt,
+            onTrust = { viewModel.trustHostKey() },
+            onForget = { viewModel.forgetChangedHostKey() },
+            onDismiss = { viewModel.dismissHostKeyPrompt() }
+        )
     }
 
     Scaffold(
@@ -409,6 +422,14 @@ fun SyncScreen(
                 }
             }
 
+            if (pendingRecipients.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(20.dp))
+                PendingRecipientsCard(
+                    changes = pendingRecipients,
+                    onApprove = { viewModel.approveRecipients(pendingRecipients) }
+                )
+            }
+
             // Section 3: Merge Conflicts Handler
             if (operation is SyncUiOperation.Conflict) {
                 val conflictOp = operation as SyncUiOperation.Conflict
@@ -468,6 +489,141 @@ fun SyncScreen(
             }
 
             Spacer(modifier = Modifier.height(32.dp))
+        }
+    }
+}
+
+/**
+ * Asks the user about an SSH server that is not pinned. A changed key is never accepted in one
+ * step: the old pin has to be dropped first, then the new key goes through the regular approval.
+ */
+@Composable
+private fun HostKeyDialog(
+    prompt: HostKeyPrompt,
+    onTrust: () -> Unit,
+    onForget: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(
+                if (prompt.changed) Icons.Default.Warning else Icons.Default.Key,
+                contentDescription = null,
+                tint = if (prompt.changed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+            )
+        },
+        title = { Text(if (prompt.changed) "A chave do servidor mudou" else "Confiar neste servidor?") },
+        text = {
+            Column {
+                Text(
+                    text = if (prompt.changed) {
+                        "${prompt.key.host} apresentou uma chave diferente da que você aprovou. " +
+                            "Isso pode ser um ataque de interceptação. A conexão foi recusada."
+                    } else {
+                        "Primeira conexão com ${prompt.key.host}. Compare a impressão digital abaixo com a " +
+                            "publicada pelo seu provedor Git antes de confiar."
+                    },
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(text = prompt.key.keyType, style = MaterialTheme.typography.labelMedium)
+                Text(
+                    text = prompt.key.fingerprint,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace
+                )
+            }
+        },
+        confirmButton = {
+            if (prompt.changed) {
+                TextButton(onClick = onDismiss) { Text("Cancelar") }
+            } else {
+                TextButton(onClick = onTrust) { Text("Confiar") }
+            }
+        },
+        dismissButton = {
+            if (prompt.changed) {
+                TextButton(onClick = onForget) {
+                    Text("Esquecer chave antiga", color = MaterialTheme.colorScheme.error)
+                }
+            } else {
+                TextButton(onClick = onDismiss) { Text("Cancelar") }
+            }
+        }
+    )
+}
+
+/** Recipients files that differ from what was approved on this device; saving under them is blocked. */
+@Composable
+private fun PendingRecipientsCard(
+    changes: List<RecipientsChange>,
+    onApprove: () -> Unit
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Warning, contentDescription = null, tint = MaterialTheme.colorScheme.error)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Destinatários aguardando aprovação",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onErrorContainer
+                )
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "Cada chave abaixo poderá ler os segredos que você salvar. Aprove somente chaves que " +
+                    "você reconhece; até lá, salvar nessas pastas fica bloqueado.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onErrorContainer
+            )
+
+            changes.forEach { change ->
+                Spacer(modifier = Modifier.height(8.dp))
+                Surface(
+                    color = MaterialTheme.colorScheme.surface,
+                    shape = MaterialTheme.shapes.small,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(10.dp)) {
+                        Text(
+                            text = change.file.relativePath,
+                            fontWeight = FontWeight.Bold,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Text(
+                            text = if (change.isNew) "Ainda não aprovado neste aparelho" else "Alterado desde a última aprovação",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.outline
+                        )
+                        change.added.forEach { recipient ->
+                            Text(
+                                text = "+ $recipient",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                        change.removed.forEach { recipient ->
+                            Text(
+                                text = "− $recipient",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.outline
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+            Button(onClick = onApprove, modifier = Modifier.fillMaxWidth()) {
+                Text("Aprovar destinatários")
+            }
         }
     }
 }

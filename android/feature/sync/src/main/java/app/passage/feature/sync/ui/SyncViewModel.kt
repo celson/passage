@@ -143,6 +143,10 @@ class SyncViewModel(
             _operation.value = SyncUiOperation.Error("A URL do repositório Git é obrigatória")
             return
         }
+        if (!CloneUrlValidator.isAllowed(trimmedUrl)) {
+            _operation.value = SyncUiOperation.Error(CloneUrlValidator.ERROR_MESSAGE)
+            return
+        }
 
         viewModelScope.launch {
             _operation.value = SyncUiOperation.Cloning("Iniciando clone...", 0f)

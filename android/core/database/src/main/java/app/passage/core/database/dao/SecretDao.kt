@@ -13,8 +13,9 @@ interface SecretDao {
     @Query("SELECT * FROM secrets_index ORDER BY relativePath ASC")
     fun getAllSecrets(): Flow<List<SecretEntity>>
 
-    @Query("SELECT * FROM secrets_index WHERE name LIKE '%' || :query || '%' OR relativePath LIKE '%' || :query || '%'")
-    suspend fun search(query: String): List<SecretEntity>
+    // Matching is done in Kotlin (AutofillMatcher): a LIKE query is substring-based and treats % and _ as wildcards
+    @Query("SELECT * FROM secrets_index ORDER BY relativePath ASC")
+    suspend fun getAll(): List<SecretEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAll(secrets: List<SecretEntity>)

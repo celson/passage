@@ -60,6 +60,7 @@ object TotpGenerator {
 
             val digitsParam = uri.getQueryParameter("digits")?.toIntOrNull() ?: 6
             val periodParam = uri.getQueryParameter("period")?.toIntOrNull() ?: 30
+            if (!areParamsValid(digitsParam, periodParam)) return null
             val algoParam = when (uri.getQueryParameter("algorithm")?.uppercase()) {
                 "SHA256" -> "HmacSHA256"
                 "SHA512" -> "HmacSHA512"
@@ -86,6 +87,17 @@ object TotpGenerator {
             )
         }.getOrNull()
     }
+
+    /**
+     * The URI comes from secret content, which a repository writer can forge: a zero period would divide
+     * by zero when the secret is opened and unbounded digits make no sense for a code.
+     */
+    internal fun areParamsValid(digits: Int, periodSeconds: Int): Boolean =
+        digits in MIN_DIGITS..MAX_DIGITS && periodSeconds in 1..MAX_PERIOD_SECONDS
+
+    private const val MIN_DIGITS = 6
+    private const val MAX_DIGITS = 8
+    private const val MAX_PERIOD_SECONDS = 300
 
     /**
      * Generates a TOTP code for the specified config and timestamp.

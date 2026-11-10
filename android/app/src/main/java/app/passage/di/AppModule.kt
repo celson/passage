@@ -13,6 +13,7 @@ import app.passage.core.git.ssh.PinnedHostKeyStore
 import app.passage.core.git.sync.GitSyncEngine
 import app.passage.core.git.tree.GopassTreeWalker
 import app.passage.core.git.tree.RecipientTrustStore
+import app.passage.core.git.tree.VaultPaths
 import app.passage.core.git.tree.VaultItem
 import app.passage.core.security.BiometricAuthManager
 import app.passage.core.security.IdentityStore
@@ -68,7 +69,7 @@ val appModule = module {
             }
 
             override suspend fun getSecretDetail(relativePath: String): Result<SecretDetail> = runCatching {
-                val file = File(repoDir, relativePath)
+                val file = VaultPaths.resolve(repoDir, relativePath)
                 val encryptedBytes = file.readBytes()
                 val gopassSecret = crypto.decryptSecret(encryptedBytes, identityStore.getIdentities())
                     .getOrElse { throw IllegalStateException(it.ageUserMessage(), it) }
@@ -91,7 +92,7 @@ val appModule = module {
                 val gopassSecret = GopassSecret(secret.password, secret.attributes, secret.attributes.keys.toList(), secret.notes)
                 val encrypted = crypto.encryptSecret(gopassSecret, recipients).getOrThrow()
 
-                val file = File(repoDir, relativePath)
+                val file = VaultPaths.resolve(repoDir, relativePath)
                 file.parentFile?.mkdirs()
                 file.writeBytes(encrypted)
             }
@@ -107,7 +108,7 @@ val appModule = module {
             }
 
             override suspend fun deleteSecret(relativePath: String): Result<Unit> = runCatching {
-                val file = File(repoDir, relativePath)
+                val file = VaultPaths.resolve(repoDir, relativePath)
                 if (file.exists()) file.delete()
             }
 

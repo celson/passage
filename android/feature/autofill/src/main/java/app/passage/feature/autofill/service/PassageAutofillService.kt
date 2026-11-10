@@ -54,16 +54,14 @@ class PassageAutofillService : AutofillService() {
 
         serviceScope.launch {
             try {
-                // Heuristic search key: domain (e.g. "github.com") or app name
-                val queryKey = extractQueryKey(parsedForm.webDomain, parsedForm.packageName)
-
-                if (queryKey.isEmpty()) {
-                    callback.onSuccess(null)
-                    return@launch
-                }
-
                 val db = PassageDatabase.getInstance(applicationContext)
-                val matches = db.secretDao().search(queryKey)
+                val matches = AutofillMatcher.filter(
+                    entries = db.secretDao().getAll(),
+                    webDomain = parsedForm.webDomain,
+                    packageName = parsedForm.packageName,
+                    pathOf = { it.relativePath },
+                    nameOf = { it.name }
+                )
 
                 if (matches.isEmpty()) {
                     callback.onSuccess(null)
@@ -119,16 +117,5 @@ class PassageAutofillService : AutofillService() {
     override fun onSaveRequest(request: SaveRequest, callback: SaveCallback) {
         // Can be used to prompt the user to save newly entered credentials into the vault
         callback.onSuccess()
-    }
-
-    private fun extractQueryKey(webDomain: String?, packageName: String?): String {
-        if (!webDomain.isNullOrBlank()) {
-            return webDomain.removePrefix("www.").substringBefore(".")
-        }
-        if (!packageName.isNullOrBlank()) {
-            val parts = packageName.split(".")
-            return parts.lastOrNull { it != "android" && it != "app" } ?: packageName
-        }
-        return ""
     }
 }

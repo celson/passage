@@ -52,17 +52,22 @@ class SecureClipboardManager(
     }
 
     private fun wipeClipboardIfMatches(expectedText: String) {
+        // On Android 10+ primaryClip is null while the app is not focused, which is the normal case
+        // when the timer fires (the user pasted in another app). An unreadable clip is therefore
+        // cleared too; only a readable clip holding different text is left alone.
         val primaryClip = clipboard.primaryClip
-        if (primaryClip != null && primaryClip.itemCount > 0) {
-            val currentText = primaryClip.getItemAt(0).text?.toString()
-            if (currentText == expectedText) {
-                // Clear the clipboard
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                    clipboard.clearPrimaryClip()
-                } else {
-                    clipboard.setPrimaryClip(ClipData.newPlainText("", ""))
-                }
-            }
+        val currentText = if (primaryClip != null && primaryClip.itemCount > 0) {
+            primaryClip.getItemAt(0).text?.toString()
+        } else {
+            null
+        }
+        val readableAndDifferent = primaryClip != null && primaryClip.itemCount > 0 && currentText != expectedText
+        if (readableAndDifferent) return
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            clipboard.clearPrimaryClip()
+        } else {
+            clipboard.setPrimaryClip(ClipData.newPlainText("", ""))
         }
     }
 }

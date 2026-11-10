@@ -177,7 +177,7 @@ class GitSyncEngine(private val hostKeyStore: PinnedHostKeyStore) {
                         // 1. Extract ours to temporary conflict file
                         val conflictFile = File(
                             repoDir,
-                            relativePath.replace(".age", ".conflict.age")
+                            relativePath.removeSuffix(".age") + ".conflict.age"
                         )
                         val originalFile = File(repoDir, relativePath)
                         originalFile.copyTo(conflictFile, overwrite = true)

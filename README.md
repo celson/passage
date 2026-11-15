@@ -2,7 +2,7 @@
   <img src="assets/icon.svg" alt="Passage" width="128" height="128">
 </p>
 
-# Passage: Gopass & age Password Store para Android
+# Passage: Gopass & age Password Store for Android
 
 [![Build](https://img.shields.io/github/actions/workflow/status/celson/pass-store-age/build.yml?branch=main&logo=github&label=build)](https://github.com/celson/pass-store-age/actions/workflows/build.yml)
 [![Release](https://img.shields.io/github/v/release/celson/pass-store-age?logo=github&label=release)](https://github.com/celson/pass-store-age/releases/latest)

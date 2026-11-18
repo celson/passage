@@ -25,12 +25,15 @@ class AgeCryptoManager {
     }
 
     /**
-     * Criptografa o texto/segredo para os destinatários (recipients) usando formato ASCII-armored (padrão gopass).
+     * Criptografa o texto/segredo para os destinatários (recipients).
+     *
+     * O padrão é o formato binário do age, o mesmo que o gopass grava e espera ler: o backend
+     * age do gopass não lê arquivos com ASCII armor (`-----BEGIN AGE ENCRYPTED FILE-----`).
      */
     suspend fun encryptSecret(
         secret: GopassSecret,
         recipients: List<String>,
-        armor: Boolean = true
+        armor: Boolean = false
     ): Result<ByteArray> = withContext(Dispatchers.Default) {
         runCatching {
             val rawText = serializeGopassSecret(secret)

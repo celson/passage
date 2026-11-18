@@ -15,7 +15,9 @@ import org.eclipse.jgit.api.Git
 import org.eclipse.jgit.api.MergeCommand
 import org.eclipse.jgit.api.TransportConfigCallback
 import org.eclipse.jgit.lib.BranchTrackingStatus
+import org.eclipse.jgit.lib.Constants
 import org.eclipse.jgit.lib.ProgressMonitor
+import org.eclipse.jgit.lib.RepositoryState
 import org.eclipse.jgit.transport.CredentialsProvider
 import org.eclipse.jgit.transport.SshTransport
 import org.eclipse.jgit.transport.Transport
@@ -60,6 +62,13 @@ class GitSyncEngine(private val hostKeyStore: PinnedHostKeyStore) {
         var hostKeys: PinningHostKeyRepository? = null
         try {
             Git.open(repoDir).use { git ->
+                // A merge left unfinished (by an older version, for instance) blocks any pull
+                when (git.repository.repositoryState) {
+                    RepositoryState.MERGING_RESOLVED -> concludeMerge(git, DEFAULT_AUTHOR_NAME, DEFAULT_AUTHOR_EMAIL)
+                    RepositoryState.MERGING -> return@withContext SyncResult.HasConflicts(conflictedFiles(git))
+                    else -> Unit
+                }
+
                 val pullCmd = git.pull()
                     .setFastForward(MergeCommand.FastForwardMode.FF)
 
@@ -102,6 +111,14 @@ class GitSyncEngine(private val hostKeyStore: PinnedHostKeyStore) {
         var hostKeys: PinningHostKeyRepository? = null
         try {
             Git.open(repoDir).use { git ->
+                val repo = git.repository
+
+                // Staging would silently "resolve" files that still hold unresolved conflicts
+                if (repo.repositoryState == RepositoryState.MERGING) {
+                    val conflicts = conflictedFiles(git)
+                    if (conflicts.isNotEmpty()) return@withContext SyncResult.HasConflicts(conflicts)
+                }
+
                 // 1. Stage files
                 val addCmd = git.add()
                 if (filesToStage.isNullOrEmpty()) {
@@ -114,11 +131,25 @@ class GitSyncEngine(private val hostKeyStore: PinnedHostKeyStore) {
                 // Also stage deleted files
                 git.add().setUpdate(true).addFilepattern(".").call()
 
-                // 2. Commit
-                val commit = git.commit()
-                    .setMessage(message)
-                    .setAuthor(authorName, authorEmail)
-                    .call()
+                // 2. Commit only when there is something to record: a resolved merge always needs
+                // its commit, but a clean tree must not produce an empty "sync" commit
+                val concludesMerge = repo.repositoryState == RepositoryState.MERGING_RESOLVED
+                val commit = if (git.status().call().hasUncommittedChanges() || concludesMerge) {
+                    git.commit()
+                        .setMessage(message)
+                        .setAuthor(authorName, authorEmail)
+                        .call()
+                } else {
+                    null
+                }
+
+                val ahead = BranchTrackingStatus.of(repo, repo.branch)?.aheadCount ?: 0
+                if (commit == null && ahead == 0) {
+                    return@withContext SyncResult.Success(
+                        repo.resolve(Constants.HEAD)?.name,
+                        "Nothing to push: already up to date"
+                    )
+                }
 
                 // 3. Push
                 val pushCmd = git.push()
@@ -133,7 +164,11 @@ class GitSyncEngine(private val hostKeyStore: PinnedHostKeyStore) {
                 }
 
                 if (pushSuccess) {
-                    SyncResult.Success(commit.name, "Committed and pushed: ${commit.shortMessage}")
+                    if (commit != null) {
+                        SyncResult.Success(commit.name, "Committed and pushed: ${commit.shortMessage}")
+                    } else {
+                        SyncResult.Success(repo.resolve(Constants.HEAD)?.name, "Pushed $ahead commit(s)")
+                    }
                 } else {
                     val errDetails = pushResults.flatMap { it.remoteUpdates }
                         .map { "${it.remoteName}: ${it.status} (${it.message ?: "no message"})" }
@@ -193,6 +228,12 @@ class GitSyncEngine(private val hostKeyStore: PinnedHostKeyStore) {
                         git.add().addFilepattern(conflictFile.relativeTo(repoDir).path).call()
                     }
                 }
+
+                // Last conflict resolved: record the merge, otherwise the repository stays in
+                // MERGING_RESOLVED and refuses to pull
+                if (git.repository.repositoryState == RepositoryState.MERGING_RESOLVED) {
+                    concludeMerge(git, DEFAULT_AUTHOR_NAME, DEFAULT_AUTHOR_EMAIL)
+                }
             }
             Unit
         }
@@ -226,6 +267,20 @@ class GitSyncEngine(private val hostKeyStore: PinnedHostKeyStore) {
                 )
             }
         }
+    }
+
+    private fun concludeMerge(git: Git, authorName: String, authorEmail: String) {
+        git.commit()
+            .setMessage("Merge remote changes (resolved in Passage)")
+            .setAuthor(authorName, authorEmail)
+            .call()
+    }
+
+    private fun conflictedFiles(git: Git): List<String> = git.status().call().conflicting.toList()
+
+    private companion object {
+        const val DEFAULT_AUTHOR_NAME = "Passage Android"
+        const val DEFAULT_AUTHOR_EMAIL = "passage@local"
     }
 
     // Helper: configure Transport and Credentials for any JGit command.

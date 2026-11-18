@@ -202,7 +202,7 @@ class SyncViewModel(
             gitSyncEngine.resolveConflict(vaultDir, relativePath, strategy).onSuccess {
                 refreshStatus()
                 refreshPendingRecipients()
-                _operation.value = SyncUiOperation.Success("Conflito em $relativePath resolvido")
+                _operation.value = SyncUiOperation.Success("Conflito em $relativePath resolvido. Toque em Push para enviar.")
             }
         }
     }
